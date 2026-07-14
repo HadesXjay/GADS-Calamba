@@ -1,0 +1,41 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAdmin() {
+      // Must match ADMIN_EMAIL in firebase-config.js exactly.
+      return request.auth != null && request.auth.token.email == "jayvimp@gmail.com";
+    }
+
+    // Events: anyone can view them (they're posted publicly on the homepage
+    // and member dashboard). Only the admin can create/edit/delete.
+    match /events/{eventId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Registrations: anyone can submit one (status must start as "pending").
+    // Only the admin can see the list, update status, or delete.
+    match /registrations/{regId} {
+      allow create: if request.resource.data.status == "pending";
+      allow read, update, delete: if isAdmin();
+    }
+
+    // Members: each doc is keyed by the family's Firebase Auth UID.
+    // A family can read (only) their own record; only the admin can write.
+    match /members/{uid} {
+      allow read: if isAdmin() || (request.auth != null && request.auth.uid == uid);
+      allow write: if isAdmin();
+    }
+
+    // RSVPs: doc id is "{eventId}_{memberId}". A member can create/update
+    // only their own RSVP (memberId must match their own uid). Admin can
+    // read everything (for the tally) and delete if needed.
+    match /rsvps/{rsvpId} {
+      allow read: if isAdmin() || (request.auth != null && request.auth.uid == resource.data.memberId);
+      allow create, update: if request.auth != null && request.auth.uid == request.resource.data.memberId;
+      allow delete: if isAdmin();
+    }
+  }
+}
