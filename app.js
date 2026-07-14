@@ -700,11 +700,18 @@ function renderMemberDashboard() {
   ${rsvpModal()}`;
 }
 
+/* ---------------------------- FIX: RSVP modal ----------------------------
+   Previously the inner card had onclick="event.stopPropagation()", which
+   blocked ALL clicks inside the modal (including the Yes/No buttons) from
+   ever reaching the single delegated click listener on document. That
+   listener is what actually calls submitRsvp(). Removed the stopPropagation
+   and instead only close the modal when the click lands directly on the
+   overlay background (id="modal-overlay") or the explicit Cancel button. */
 function rsvpModal() {
   if (!state.modal) return "";
   return `
-  <div class="modal-overlay" data-modal-close="1">
-    <div class="modal-card" onclick="event.stopPropagation()">
+  <div class="modal-overlay" id="modal-overlay">
+    <div class="modal-card">
       <h3>Will you join</h3>
       <p class="modal-event-title">${escapeHtml(state.modal.title)}?</p>
       <div class="modal-actions">
@@ -924,7 +931,11 @@ document.addEventListener("click", (ev) => {
   const rsvpNo = ev.target.closest("[data-rsvp-no]");
   if (rsvpNo) { submitRsvp(rsvpNo.getAttribute("data-rsvp-no"), "no"); return; }
 
-  const modalClose = ev.target.closest("[data-modal-close]");
+  /* FIX: only close the modal when the click is directly on the overlay
+     background (id="modal-overlay") or the explicit Cancel button — not
+     on anything nested inside the card. This check must stay AFTER the
+     rsvpYes/rsvpNo checks above, since those return early. */
+  const modalClose = ev.target.id === "modal-overlay" || ev.target.closest("[data-modal-close]");
   if (modalClose) { closeModal(); return; }
 
   const editEvent = ev.target.closest("[data-edit-event]");
