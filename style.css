@@ -127,6 +127,9 @@ img { max-width: 100%; }
 .hero-dot { width: 8px; height: 8px; border-radius: 50%; background: rgba(255,255,255,0.5); cursor: pointer; transition: all .2s ease; padding: 0; border: none; }
 .hero-dot.active { background: var(--yellow); width: 22px; border-radius: 4px; }
 .wing-divider { position: relative; z-index: 2; display: block; width: 100%; height: 46px; margin-top: -46px; }
+/* Inside the full-bleed photo hero, pin the wave to the true bottom edge
+   of the photo — not wherever the text content happens to end. */
+.hero-full .wing-divider { position: absolute; left: 0; right: 0; bottom: -1px; margin-top: 0; z-index: 2; }
 
 .eyebrow { display: inline-block; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 700; font-size: 0.76rem; color: var(--coral); margin-bottom: 10px; }
 .eyebrow.center { display: block; text-align: center; }
