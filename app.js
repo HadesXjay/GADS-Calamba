@@ -22,7 +22,7 @@ const db = getFirestore(app);
 const LOGO_SRC = "assets/logo.png";
 
 const HERO_PHOTOS = [
-  "assets/photo1.jpg",
+  "assets/Photo1.jpg",
   "assets/Photo2.jpg",
   "assets/Photo3.jpg",
   "assets/Photo4.jpg",
@@ -33,7 +33,7 @@ const HERO_PHOTOS = [
 function heroSlideshowHTML() {
   return `<div class="hero-slideshow">
     ${HERO_PHOTOS.map((src, i) =>
-      `<img src="${src}" alt="GADs community photo ${i + 1}" class="hero-slide ${i === 0 ? "active" : ""}" />`
+      `<img src="${src}" alt="GADs community photo ${i + 1}" class="hero-slide ${i === 0 ? "active" : ""}" loading="${i === 0 ? "eager" : "lazy"}" />`
     ).join("")}
   </div>`;
 }
@@ -53,7 +53,8 @@ let state = {
   adminTab: "pending",
   editingEventId: null,
   notice: null,
-  modal: null
+  modal: null,
+  mobileNavOpen: false
 };
 
 let unsubEvents = null, unsubRegs = null, unsubMembers = null, unsubMyRsvps = null, unsubAllRsvps = null;
@@ -95,6 +96,7 @@ function setNotice(kind, text, ms = 4000) {
 function goto(view) {
   state.view = view;
   state.notice = null;
+  state.mobileNavOpen = false;
   render();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
@@ -412,6 +414,16 @@ function navBar(active) {
         <button class="btn btn-ghost" data-nav="login">Member Login</button>
         <button class="btn btn-primary" data-nav="register">Register</button>
       </div>
+      <button class="mobile-menu-btn" data-mobile-toggle="1" aria-label="Menu">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+    <div class="mobile-nav-panel ${state.mobileNavOpen ? 'open' : ''}">
+      <a data-nav="home" class="${active === 'home' ? 'active' : ''}">Home</a>
+      <a data-nav="about" class="${active === 'about' ? 'active' : ''}">About</a>
+      <a data-nav="contact" class="${active === 'contact' ? 'active' : ''}">Contact</a>
+      <a data-nav="login" class="${active === 'login' ? 'active' : ''}">Member Login</a>
+      <button class="btn btn-primary full-width" data-nav="register">Register</button>
     </div>
   </header>`;
 }
@@ -700,13 +712,9 @@ function renderMemberDashboard() {
   ${rsvpModal()}`;
 }
 
-/* ---------------------------- FIX: RSVP modal ----------------------------
-   Previously the inner card had onclick="event.stopPropagation()", which
-   blocked ALL clicks inside the modal (including the Yes/No buttons) from
-   ever reaching the single delegated click listener on document. That
-   listener is what actually calls submitRsvp(). Removed the stopPropagation
-   and instead only close the modal when the click lands directly on the
-   overlay background (id="modal-overlay") or the explicit Cancel button. */
+/* RSVP modal — closes only on overlay-background click or explicit Cancel,
+   never on clicks inside the card, so Yes/No buttons always reach the
+   delegated document click listener. */
 function rsvpModal() {
   if (!state.modal) return "";
   return `
@@ -902,6 +910,9 @@ function render() {
 }
 
 document.addEventListener("click", (ev) => {
+  const mobileToggle = ev.target.closest("[data-mobile-toggle]");
+  if (mobileToggle) { state.mobileNavOpen = !state.mobileNavOpen; render(); return; }
+
   const nav = ev.target.closest("[data-nav]");
   if (nav) { goto(nav.getAttribute("data-nav")); return; }
 
@@ -931,10 +942,6 @@ document.addEventListener("click", (ev) => {
   const rsvpNo = ev.target.closest("[data-rsvp-no]");
   if (rsvpNo) { submitRsvp(rsvpNo.getAttribute("data-rsvp-no"), "no"); return; }
 
-  /* FIX: only close the modal when the click is directly on the overlay
-     background (id="modal-overlay") or the explicit Cancel button — not
-     on anything nested inside the card. This check must stay AFTER the
-     rsvpYes/rsvpNo checks above, since those return early. */
   const modalClose = ev.target.id === "modal-overlay" || ev.target.closest("[data-modal-close]");
   if (modalClose) { closeModal(); return; }
 
