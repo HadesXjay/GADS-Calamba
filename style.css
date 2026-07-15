@@ -88,12 +88,16 @@ img { max-width: 100%; }
 .mobile-nav-panel .btn { margin-top: 10px; }
 
 /* ---------- buttons ---------- */
-.btn { border: none; border-radius: 999px; padding: 11px 20px; font-weight: 700; font-size: 0.92rem; transition: transform .15s ease, box-shadow .15s ease, background .15s ease; min-height: 44px; }
+.btn { border: none; border-radius: 999px; padding: 11px 20px; font-weight: 700; font-size: 0.92rem; transition: transform .15s ease, box-shadow .15s ease, background .15s ease; min-height: 44px; text-transform: uppercase; letter-spacing: 0.03em; }
 .btn:hover { transform: translateY(-1px); }
 .btn-primary { background: var(--yellow); color: var(--navy); box-shadow: 0 6px 16px rgba(226,160,34,0.35); }
 .btn-primary:hover { background: var(--yellow-deep); }
 .btn-outline { background: transparent; color: var(--navy); border: 2px solid var(--navy); }
 .btn-outline:hover { background: var(--navy); color: #fff; }
+/* "Learn more" sits on the dark hero photo — navy-on-navy was nearly
+   invisible, so give outline buttons a white treatment there specifically. */
+.hero-full .btn-outline { border-color: #fff; color: #fff; }
+.hero-full .btn-outline:hover { background: #fff; color: var(--navy); }
 .btn-ghost { background: transparent; color: var(--navy-soft); font-weight: 600; min-height: auto; }
 .btn-ghost:hover { color: var(--navy); }
 .btn-lg { padding: 15px 28px; font-size: 1rem; min-height: 50px; }
