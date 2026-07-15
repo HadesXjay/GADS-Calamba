@@ -552,7 +552,6 @@ function renderContact() {
         <div class="contact-card"><div class="contact-icon">✉️</div><h4>Email</h4><p>alicealzona.016@gmail.com</p></div>
         <div class="contact-card"><div class="contact-icon">📱</div><h4>Phone / Messenger</h4><p>(+63917-303-7810)</p></div>
       </div>
-      <p class="fine-print center">These are placeholder contact details — replace them with the org's real ones.</p>
     </section>
   </main>
   ${footer()}`;
@@ -1005,3 +1004,5 @@ document.addEventListener("click", (ev) => {
   const dot = ev.target.closest("[data-dot]");
   if (dot) showHeroSlide(parseInt(dot.getAttribute("data-dot"), 10));
 });
+
+
