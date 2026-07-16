@@ -410,7 +410,7 @@ function navBar(active) {
         <a data-nav="about" class="${active === 'about' ? 'active' : ''}">About</a>
         <a data-nav="contact" class="${active === 'contact' ? 'active' : ''}">Contact</a>
       </nav>
-      <div class="nav-actions">
+      <div class="nav-actions nav-actions-public">
         <button class="btn btn-ghost" data-nav="login">Member Login</button>
         <button class="btn btn-primary" data-nav="register">Register</button>
       </div>
@@ -689,7 +689,7 @@ function renderMemberDashboard() {
   return `
   <header class="site-header">
     <div class="wrap nav-inner">
-      <div class="brand"><img src="${LOGO_SRC}" class="brand-logo" alt="GADs logo"/>
+      <div class="brand" data-nav="home"><img src="${LOGO_SRC}" class="brand-logo" alt="GADs logo"/>
         <div class="brand-text"><span class="brand-title">Gentle Angels</span><span class="brand-sub">Member Dashboard</span></div>
       </div>
       <div class="nav-actions">
@@ -847,7 +847,7 @@ function renderAdminDashboard() {
   return `
   <header class="site-header">
     <div class="wrap nav-inner">
-      <div class="brand"><img src="${LOGO_SRC}" class="brand-logo" alt="GADs logo"/>
+      <div class="brand" data-nav="home"><img src="${LOGO_SRC}" class="brand-logo" alt="GADs logo"/>
         <div class="brand-text"><span class="brand-title">Gentle Angels</span><span class="brand-sub">Admin Panel</span></div>
       </div>
       <div class="nav-actions"><button class="btn btn-ghost" data-logout="1">Log out</button></div>
@@ -1004,5 +1004,3 @@ document.addEventListener("click", (ev) => {
   const dot = ev.target.closest("[data-dot]");
   if (dot) showHeroSlide(parseInt(dot.getAttribute("data-dot"), 10));
 });
-
-
