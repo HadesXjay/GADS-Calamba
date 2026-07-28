@@ -1,6 +1,7 @@
 /* ===================== GADs — Gentle Angels Down Syndrome of Calamba =====================
    Firebase-backed version: real admin login (email/password), real member accounts,
-   Firestore for events / registrations / members / rsvps. See README.md for setup.
+   Firestore for events / registrations / members / rsvps / announcements / eventPhotos.
+   See README.md for setup.
 =========================================================================================== */
 
 import { initializeApp, deleteApp } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js";
@@ -12,12 +13,16 @@ import {
   getFirestore, collection, doc, setDoc, addDoc, updateDoc, deleteDoc, getDoc,
   onSnapshot, query, where, serverTimestamp
 } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js";
+import {
+  getStorage, ref as storageRef, uploadBytes, getDownloadURL, deleteObject
+} from "https://www.gstatic.com/firebasejs/12.16.0/firebase-storage.js";
 
 import { firebaseConfig, ADMIN_EMAIL } from "./firebase-config.js";
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
+const storage = getStorage(app);
 
 const LOGO_SRC = "assets/logo.png";
 
@@ -54,10 +59,13 @@ let state = {
   editingEventId: null,
   notice: null,
   modal: null,
-  mobileNavOpen: false
+  mobileNavOpen: false,
+  announcements: [],
+  eventPhotos: []
 };
 
-let unsubEvents = null, unsubRegs = null, unsubMembers = null, unsubMyRsvps = null, unsubAllRsvps = null;
+let unsubEvents = null, unsubRegs = null, unsubMembers = null, unsubMyRsvps = null,
+    unsubAllRsvps = null, unsubAnnouncements = null, unsubEventPhotos = null;
 
 /* ---------------------------- utilities ---------------------------- */
 
@@ -86,6 +94,54 @@ function randomPassword() {
   return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
 }
 
+function icsEscape(str) {
+  return String(str ?? "").replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/,/g, "\\,").replace(/;/g, "\\;");
+}
+
+function addEventToCalendar(eventId) {
+  const e = state.events.find(ev => ev.id === eventId);
+  if (!e) return;
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").split(".")[0] + "Z";
+  let dtStart, dtEnd;
+  if (e.time) {
+    const [h, m] = e.time.split(":").map(Number);
+    const start = new Date(e.date + "T00:00:00");
+    start.setHours(h, m, 0, 0);
+    const end = new Date(start.getTime() + 2 * 60 * 60 * 1000); // default 2-hour block
+    const fmt = (d) => `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,"0")}${String(d.getDate()).padStart(2,"0")}T${String(d.getHours()).padStart(2,"0")}${String(d.getMinutes()).padStart(2,"0")}00`;
+    dtStart = `DTSTART:${fmt(start)}`;
+    dtEnd = `DTEND:${fmt(end)}`;
+  } else {
+    const d = e.date.replace(/-/g, "");
+    const next = new Date(e.date + "T00:00:00");
+    next.setDate(next.getDate() + 1);
+    const dNext = `${next.getFullYear()}${String(next.getMonth()+1).padStart(2,"0")}${String(next.getDate()).padStart(2,"0")}`;
+    dtStart = `DTSTART;VALUE=DATE:${d}`;
+    dtEnd = `DTEND;VALUE=DATE:${dNext}`;
+  }
+  const ics = [
+    "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//GADs Calamba//Events//EN",
+    "BEGIN:VEVENT",
+    `UID:${e.id}@gads-calamba`,
+    `DTSTAMP:${stamp}`,
+    dtStart, dtEnd,
+    `SUMMARY:${icsEscape(e.title)}`,
+    `LOCATION:${icsEscape(e.location)}`,
+    e.description ? `DESCRIPTION:${icsEscape(e.description)}` : "",
+    "END:VEVENT", "END:VCALENDAR"
+  ].filter(Boolean).join("\r\n");
+
+  const blob = new Blob([ics], { type: "text/calendar;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${e.title.replace(/[^a-z0-9]+/gi, "-")}.ics`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 function setNotice(kind, text, ms = 4000) {
   state.notice = { kind, text };
   render();
@@ -107,6 +163,7 @@ onAuthStateChanged(auth, async (user) => {
   state.authChecked = true;
   detachMemberOnlyListeners();
   detachAdminOnlyListeners();
+  detachAnnouncementsListener();
 
   if (!user) {
     state.isAdmin = false;
@@ -115,6 +172,7 @@ onAuthStateChanged(auth, async (user) => {
     state.isAdmin = true;
     state.currentMember = null;
     attachAdminOnlyListeners();
+    attachAnnouncementsListener();
     if (state.view === "home" || state.view === "adminLogin" || state.view === "login") state.view = "adminDashboard";
   } else {
     // a member account
@@ -123,6 +181,7 @@ onAuthStateChanged(auth, async (user) => {
       if (snap.exists() && snap.data().status === "active") {
         state.currentMember = { id: user.uid, ...snap.data() };
         attachMemberOnlyListeners(user.uid);
+        attachAnnouncementsListener();
         if (state.view === "home" || state.view === "login") state.view = "memberDashboard";
       } else {
         await signOut(auth);
@@ -143,6 +202,16 @@ function attachPublicListeners() {
     state.events = snap.docs.map(d => ({ id: d.id, ...d.data() }));
     render();
   }, (err) => console.error("events listener", err));
+
+  unsubEventPhotos = onSnapshot(collection(db, "eventPhotos"), (snap) => {
+    state.eventPhotos = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+      .sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
+    render();
+  }, (err) => console.error("eventPhotos listener", err));
+}
+
+function eventPhotosFor(eventId) {
+  return state.eventPhotos.filter(p => p.eventId === eventId);
 }
 
 function attachAdminOnlyListeners() {
@@ -182,6 +251,22 @@ function detachMemberOnlyListeners() {
   state.myRsvps = [];
 }
 
+// Announcements are visible to any signed-in user (admin or an approved
+// member) but not to anonymous public visitors — see firestore.rules.
+function attachAnnouncementsListener() {
+  unsubAnnouncements = onSnapshot(collection(db, "announcements"), (snap) => {
+    state.announcements = snap.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
+    render();
+  }, (err) => console.error("announcements listener", err));
+}
+
+function detachAnnouncementsListener() {
+  if (unsubAnnouncements) { unsubAnnouncements(); unsubAnnouncements = null; }
+  state.announcements = [];
+}
+
 /* ---------------------------- actions: registration ---------------------------- */
 
 async function submitRegistration(form) {
@@ -192,14 +277,49 @@ async function submitRegistration(form) {
   const email = fd.get("email").trim().toLowerCase();
   const phone = fd.get("phone").trim();
   const notes = fd.get("notes").trim();
+  const password = fd.get("password");
+  const confirmPassword = fd.get("confirmPassword");
 
-  if (!guardianName || !memberName || !email || !phone) {
+  if (!guardianName || !memberName || !email || !phone || !password) {
     setNotice("error", "Please fill in all required fields.");
     return;
   }
+  if (password.length < 6) {
+    setNotice("error", "Password must be at least 6 characters.");
+    return;
+  }
+  if (password !== confirmPassword) {
+    setNotice("error", "Passwords don't match.");
+    return;
+  }
+
+  // Create their login right now, on a secondary app instance so this
+  // doesn't sign the browser in as a not-yet-approved account. The account
+  // will just sit unapproved (no "members" doc) until an admin approves it.
+  const secondaryApp = initializeApp(firebaseConfig, "secondary-" + Date.now());
+  const secondaryAuth = getAuth(secondaryApp);
+  let authUid = null;
+  try {
+    const cred = await createUserWithEmailAndPassword(secondaryAuth, email, password);
+    authUid = cred.user.uid;
+    await signOut(secondaryAuth);
+  } catch (e) {
+    await deleteApp(secondaryApp);
+    if (e.code === "auth/email-already-in-use") {
+      setNotice("error", "That email already has an account. Try logging in, or use a different email.");
+    } else if (e.code === "auth/weak-password") {
+      setNotice("error", "Please choose a stronger password (at least 6 characters).");
+    } else {
+      console.error(e);
+      setNotice("error", "Something went wrong submitting your registration. Please try again.");
+    }
+    return;
+  }
+  await deleteApp(secondaryApp);
+
   try {
     await addDoc(collection(db, "registrations"), {
-      guardianName, memberName, relationship, email, phone, notes,
+      guardianName, memberName, relationship, email, phone, notes, authUid,
       status: "pending", createdAt: serverTimestamp()
     });
     goto("registerSuccess");
@@ -230,8 +350,27 @@ async function approveRegistration(regId) {
   const reg = state.registrations.find(r => r.id === regId);
   if (!reg) return;
 
-  // Create the family's real login using a secondary app instance so we
-  // don't disturb the admin's own signed-in session.
+  // Families who registered after the self-service password feature shipped
+  // already have an auth account (reg.authUid) — approving just activates it.
+  // Older pending registrations from before that change won't have an
+  // authUid, so we fall back to creating the account + emailing a reset link.
+  if (reg.authUid) {
+    try {
+      await setDoc(doc(db, "members", reg.authUid), {
+        guardianName: reg.guardianName, memberName: reg.memberName,
+        relationship: reg.relationship || "", email: reg.email, phone: reg.phone,
+        status: "active", createdAt: serverTimestamp()
+      });
+      await updateDoc(doc(db, "registrations", regId), { status: "approved" });
+      setNotice("success", `Approved. ${reg.email} can log in now with the password they set.`);
+    } catch (e) {
+      console.error(e);
+      setNotice("error", "Couldn't approve — please try again.");
+    }
+    return;
+  }
+
+  // Legacy path: no self-set password on file for this registration.
   const secondaryApp = initializeApp(firebaseConfig, "secondary-" + Date.now());
   const secondaryAuth = getAuth(secondaryApp);
   try {
@@ -273,6 +412,20 @@ async function revokeMember(uid) {
     await updateDoc(doc(db, "members", uid), { status: "revoked" });
     setNotice("success", "Access revoked. (To fully delete their login, remove the user in the Firebase console under Authentication.)");
   } catch (e) { console.error(e); setNotice("error", "Couldn't update — try again."); }
+}
+
+async function deleteMember(uid) {
+  try {
+    await deleteDoc(doc(db, "members", uid));
+    setNotice("success", "Member record deleted. (To fully remove their login, also delete the user in the Firebase console under Authentication.)");
+  } catch (e) { console.error(e); setNotice("error", "Couldn't delete — try again."); }
+}
+
+async function deleteRegistration(regId) {
+  try {
+    await deleteDoc(doc(db, "registrations", regId));
+    setNotice("success", "Registration removed.");
+  } catch (e) { console.error(e); setNotice("error", "Couldn't delete — try again."); }
 }
 
 async function resendReset(email) {
@@ -354,6 +507,59 @@ async function setEventStatus(id, status) {
 async function deleteEvent(id) {
   try { await deleteDoc(doc(db, "events", id)); setNotice("success", "Event deleted."); }
   catch (e) { console.error(e); setNotice("error", "Couldn't delete — try again."); }
+}
+
+/* ---------------------------- actions: event photos ---------------------------- */
+
+async function uploadEventPhoto(eventId, file) {
+  if (!file) return;
+  if (!file.type.startsWith("image/")) { setNotice("error", "Please choose an image file."); return; }
+  if (file.size > 8 * 1024 * 1024) { setNotice("error", "Image is too large (max 8MB)."); return; }
+  try {
+    setNotice("success", "Uploading photo…", 2000);
+    const path = `event-photos/${eventId}/${Date.now()}-${file.name}`;
+    const fileRef = storageRef(storage, path);
+    await uploadBytes(fileRef, file);
+    const url = await getDownloadURL(fileRef);
+    await addDoc(collection(db, "eventPhotos"), {
+      eventId, url, storagePath: path, createdAt: serverTimestamp(), createdAtMs: Date.now()
+    });
+    setNotice("success", "Photo uploaded.");
+  } catch (e) {
+    console.error(e);
+    setNotice("error", "Couldn't upload the photo — try again.");
+  }
+}
+
+async function deleteEventPhoto(photoId, storagePath) {
+  try {
+    if (storagePath) {
+      try { await deleteObject(storageRef(storage, storagePath)); } catch (err) { console.warn("storage delete failed", err); }
+    }
+    await deleteDoc(doc(db, "eventPhotos", photoId));
+    setNotice("success", "Photo removed.");
+  } catch (e) { console.error(e); setNotice("error", "Couldn't remove the photo — try again."); }
+}
+
+/* ---------------------------- actions: announcements ---------------------------- */
+
+async function createAnnouncement(form) {
+  const fd = new FormData(form);
+  const title = fd.get("title").trim();
+  const body = fd.get("body").trim();
+  if (!title || !body) { setNotice("error", "Please fill in both the title and message."); return; }
+  try {
+    await addDoc(collection(db, "announcements"), {
+      title, body, createdAt: serverTimestamp(), createdAtMs: Date.now()
+    });
+    setNotice("success", "Announcement posted.");
+    form.reset();
+  } catch (e) { console.error(e); setNotice("error", "Couldn't post — try again."); }
+}
+
+async function deleteAnnouncement(id) {
+  try { await deleteDoc(doc(db, "announcements", id)); setNotice("success", "Announcement removed."); }
+  catch (e) { console.error(e); setNotice("error", "Couldn't remove — try again."); }
 }
 
 /* ---------------------------- actions: rsvp ---------------------------- */
@@ -487,6 +693,16 @@ function renderHome() {
       </div>
     </section>
 
+    <section class="section section-soft">
+      <div class="wrap">
+        <span class="eyebrow center">Moments</span>
+        <h2 class="center">From our recent events</h2>
+        ${state.eventPhotos.length
+          ? `<div class="gallery-grid">${state.eventPhotos.slice(0, 8).map(p => `<div class="gallery-item"><img src="${p.url}" alt="GADs event photo" loading="lazy" /></div>`).join("")}</div>`
+          : `<p class="empty center">Photos from our events will appear here soon.</p>`}
+      </div>
+    </section>
+
     <section class="section section-cta">
       <div class="wrap cta-inner">
         <h2>New to GADs?</h2>
@@ -583,7 +799,8 @@ function renderRegister() {
       <div class="wrap wrap-narrow">
         <span class="eyebrow">Join GADs</span>
         <h1>Register your family</h1>
-        <p class="lead">Fill this in and our team will review it. Once approved, we'll email you a link to set your password.</p>
+        <p class="lead">Fill this in and choose a password now. Our team will review your registration, and once
+        approved you can log in right away with the password you set below.</p>
         <form id="register-form" class="card form-card">
           <label>Parent / Guardian full name *<input name="guardianName" required /></label>
           <label>Name of family member with Down syndrome *<input name="memberName" required /></label>
@@ -592,6 +809,11 @@ function renderRegister() {
             <label>Email address *<input type="email" name="email" required /></label>
             <label>Phone number *<input type="tel" name="phone" required /></label>
           </div>
+          <div class="two-col">
+            <label>Create a password *<input type="password" name="password" minlength="6" required /></label>
+            <label>Confirm password *<input type="password" name="confirmPassword" minlength="6" required /></label>
+          </div>
+          <p class="fine-print">At least 6 characters. You'll use this to log in once you're approved.</p>
           <label>Anything you'd like us to know<textarea name="notes" rows="3"></textarea></label>
           <button type="submit" class="btn btn-primary btn-lg full-width">Submit registration</button>
         </form>
@@ -609,8 +831,8 @@ function renderRegisterSuccess() {
       <div class="wrap wrap-narrow center">
         <div class="big-emoji">💛</div>
         <h1>Thank you!</h1>
-        <p class="lead">Your registration is in. Our team will review it and email you once you're approved,
-        with a link to set your password for the member dashboard.</p>
+        <p class="lead">Your registration is in. Our team will review it, and once you're approved you can log in
+        to the member dashboard right away with the password you just created.</p>
         <button class="btn btn-outline" data-nav="home">Back to home</button>
       </div>
     </section>
@@ -626,7 +848,7 @@ function renderLogin() {
       <div class="wrap wrap-narrow">
         <span class="eyebrow center">Members</span>
         <h1 class="center">Log in to your dashboard</h1>
-        <p class="lead center">Use the email you registered with, and the password you set from our email.</p>
+        <p class="lead center">Use the email you registered with, and the password you set.</p>
         <form id="login-form" class="card form-card">
           <label>Email address<input type="email" name="email" required /></label>
           <label>Password<input type="password" name="password" required /></label>
@@ -665,6 +887,9 @@ function renderMemberDashboard() {
   const groups = { upcoming: [], ongoing: [], completed: [] };
   sorted.forEach(e => groups[e.status] && groups[e.status].push(e));
 
+  const nextUp = [...groups.ongoing, ...groups.upcoming]
+    .sort((a, b) => (a.date + (a.time||"")).localeCompare(b.date + (b.time||"")))[0] || null;
+
   const card = (e) => {
     const mine = getMyRsvp(e.id);
     const canRsvp = e.status !== "completed";
@@ -682,7 +907,41 @@ function renderMemberDashboard() {
                <button class="link small" data-rsvp-open="${e.id}" data-rsvp-title="${escapeHtml(e.title)}">Change</button>
              </div>`
           : `<button class="btn btn-primary full-width" data-rsvp-open="${e.id}" data-rsvp-title="${escapeHtml(e.title)}">Will you join?</button>`}
+        <button class="link small ics-link" data-ics="${e.id}">📅 Add to Calendar</button>
       ` : `<p class="fine-print">This event has ended.</p>`}
+    </div>`;
+  };
+
+  const nextUpBannerHTML = () => {
+    if (!nextUp) return "";
+    const mine = getMyRsvp(nextUp.id);
+    return `
+    <div class="next-up-banner">
+      <span class="next-up-label">${nextUp.status === "ongoing" ? "Happening now" : "Next up"}</span>
+      <h2>${escapeHtml(nextUp.title)}</h2>
+      <p class="next-up-meta">📅 ${fmtDate(nextUp.date)}${nextUp.time ? " · " + fmtTime(nextUp.time) : ""} &nbsp;·&nbsp; 📍 ${escapeHtml(nextUp.location)}</p>
+      <div class="next-up-actions">
+        ${mine
+          ? `<span class="rsvp-status rsvp-${mine.response} inline">${mine.response === "yes" ? "✅ You're going!" : "❎ Not attending"}</span>
+             <button class="link small light" data-rsvp-open="${nextUp.id}" data-rsvp-title="${escapeHtml(nextUp.title)}">Change</button>`
+          : `<button class="btn btn-primary" data-rsvp-open="${nextUp.id}" data-rsvp-title="${escapeHtml(nextUp.title)}">Will you join?</button>`}
+        <button class="btn btn-outline light" data-ics="${nextUp.id}">📅 Add to Calendar</button>
+      </div>
+    </div>`;
+  };
+
+  const announcementsHTML = () => {
+    if (!state.announcements.length) return "";
+    return `
+    <div class="announcements-block">
+      <h2 class="section-sub">Announcements</h2>
+      <div class="announcement-list">
+        ${state.announcements.slice(0, 5).map(a => `
+          <div class="announcement-card">
+            <h4>${escapeHtml(a.title)}</h4>
+            <p>${escapeHtml(a.body)}</p>
+          </div>`).join("")}
+      </div>
     </div>`;
   };
 
@@ -701,6 +960,8 @@ function renderMemberDashboard() {
   <main>
     <section class="section">
       <div class="wrap">
+        ${nextUpBannerHTML()}
+        ${announcementsHTML()}
         <h1>Upcoming events</h1>
         ${groups.upcoming.length ? `<div class="event-grid">${groups.upcoming.map(card).join("")}</div>` : `<p class="empty">No upcoming events right now — check back soon.</p>`}
         ${groups.ongoing.length ? `<h2 class="section-sub">Happening now</h2><div class="event-grid">${groups.ongoing.map(card).join("")}</div>` : ""}
@@ -743,6 +1004,7 @@ function renderAdminDashboard() {
     </button>
     <button class="tab ${state.adminTab === 'members' ? 'active' : ''}" data-admin-tab="members">Members</button>
     <button class="tab ${state.adminTab === 'events' ? 'active' : ''}" data-admin-tab="events">Events</button>
+    <button class="tab ${state.adminTab === 'announcements' ? 'active' : ''}" data-admin-tab="announcements">Announcements</button>
   </div>`;
 
   let body = "";
@@ -767,8 +1029,8 @@ function renderAdminDashboard() {
 
     if (decidedRegs.length) {
       body += `<h3 class="section-sub">Past applications</h3><div class="table-wrap"><table class="admin-table">
-        <thead><tr><th>Guardian</th><th>Member</th><th>Status</th></tr></thead>
-        <tbody>${decidedRegs.map(r => `<tr><td>${escapeHtml(r.guardianName)}</td><td>${escapeHtml(r.memberName)}</td><td>${statusPill(r.status)}</td></tr>`).join("")}</tbody>
+        <thead><tr><th>Guardian</th><th>Member</th><th>Status</th><th></th></tr></thead>
+        <tbody>${decidedRegs.map(r => `<tr><td>${escapeHtml(r.guardianName)}</td><td>${escapeHtml(r.memberName)}</td><td>${statusPill(r.status)}</td><td class="actions-cell"><button class="btn btn-outline btn-sm" data-delete-registration="${r.id}">Delete</button></td></tr>`).join("")}</tbody>
       </table></div>`;
     }
   }
@@ -782,7 +1044,8 @@ function renderAdminDashboard() {
         <td>${statusPill(m.status)}</td>
         <td class="actions-cell">${showActions ? `
           <button class="btn btn-outline btn-sm" data-resend="${escapeHtml(m.email)}">Resend reset email</button>
-          <button class="btn btn-outline btn-sm" data-revoke="${m.id}">Revoke</button>` : ""}</td>
+          <button class="btn btn-outline btn-sm" data-revoke="${m.id}">Revoke</button>` : ""}
+          <button class="btn btn-outline btn-sm" data-delete-member="${m.id}">Delete</button></td>
       </tr>`;
     body = `
       <div class="table-wrap"><table class="admin-table">
@@ -839,8 +1102,45 @@ function renderAdminDashboard() {
             <button class="btn btn-outline btn-sm" data-edit-event="${e.id}">Edit</button>
             <button class="btn btn-outline btn-sm" data-delete-event="${e.id}">Delete</button>
           </div>
+          <div class="admin-event-photos">
+            <label class="btn btn-outline btn-sm photo-upload-btn">
+              📷 Upload Photo
+              <input type="file" accept="image/*" data-photo-upload="${e.id}" hidden />
+            </label>
+            ${eventPhotosFor(e.id).length ? `<div class="photo-thumb-row">
+              ${eventPhotosFor(e.id).map(p => `
+                <div class="photo-thumb">
+                  <img src="${p.url}" alt="" />
+                  <button class="photo-thumb-remove" data-delete-photo="${p.id}" data-photo-path="${escapeHtml(p.storagePath)}">✕</button>
+                </div>`).join("")}
+            </div>` : `<p class="fine-print">No photos yet — upload some to showcase this event.</p>`}
+          </div>
         </div>`;
       }).join("") : `<p class="empty">No events yet — create the first one above.</p>`}
+    `;
+  }
+
+  if (state.adminTab === "announcements") {
+    body = `
+      <div class="card form-card">
+        <h3>Post a new announcement</h3>
+        <form id="announcement-form">
+          <label>Title *<input name="title" required /></label>
+          <label>Message *<textarea name="body" rows="3" required></textarea></label>
+          <button type="submit" class="btn btn-primary">Post announcement</button>
+        </form>
+      </div>
+      <h3 class="section-sub">Posted announcements</h3>
+      ${state.announcements.length ? state.announcements.map(a => `
+        <div class="admin-event-row">
+          <div class="admin-event-info">
+            <h4>${escapeHtml(a.title)}</h4>
+            <p class="event-desc">${escapeHtml(a.body)}</p>
+          </div>
+          <div class="admin-event-actions">
+            <button class="btn btn-outline btn-sm" data-delete-announcement="${a.id}">Delete</button>
+          </div>
+        </div>`).join("") : `<p class="empty">No announcements yet.</p>`}
     `;
   }
 
@@ -926,6 +1226,22 @@ document.addEventListener("click", (ev) => {
   const revoke = ev.target.closest("[data-revoke]");
   if (revoke) { revokeMember(revoke.getAttribute("data-revoke")); return; }
 
+  const delMember = ev.target.closest("[data-delete-member]");
+  if (delMember) {
+    if (confirm("Delete this member record? This can't be undone. (Their login will still exist in Firebase Authentication unless you also remove it there.)")) {
+      deleteMember(delMember.getAttribute("data-delete-member"));
+    }
+    return;
+  }
+
+  const delRegistration = ev.target.closest("[data-delete-registration]");
+  if (delRegistration) {
+    if (confirm("Delete this registration record? This can't be undone.")) {
+      deleteRegistration(delRegistration.getAttribute("data-delete-registration"));
+    }
+    return;
+  }
+
   const resend = ev.target.closest("[data-resend]");
   if (resend) { resendReset(resend.getAttribute("data-resend")); return; }
 
@@ -940,6 +1256,9 @@ document.addEventListener("click", (ev) => {
 
   const rsvpNo = ev.target.closest("[data-rsvp-no]");
   if (rsvpNo) { submitRsvp(rsvpNo.getAttribute("data-rsvp-no"), "no"); return; }
+
+  const icsBtn = ev.target.closest("[data-ics]");
+  if (icsBtn) { addEventToCalendar(icsBtn.getAttribute("data-ics")); return; }
 
   const modalClose = ev.target.id === "modal-overlay" || ev.target.closest("[data-modal-close]");
   if (modalClose) { closeModal(); return; }
@@ -956,6 +1275,18 @@ document.addEventListener("click", (ev) => {
     return;
   }
 
+  const delPhoto = ev.target.closest("[data-delete-photo]");
+  if (delPhoto) {
+    if (confirm("Remove this photo?")) deleteEventPhoto(delPhoto.getAttribute("data-delete-photo"), delPhoto.getAttribute("data-photo-path"));
+    return;
+  }
+
+  const delAnnouncement = ev.target.closest("[data-delete-announcement]");
+  if (delAnnouncement) {
+    if (confirm("Delete this announcement?")) deleteAnnouncement(delAnnouncement.getAttribute("data-delete-announcement"));
+    return;
+  }
+
   const forgotBtn = ev.target.closest("#forgot-btn");
   if (forgotBtn) {
     const emailInput = document.querySelector('#login-form input[name="email"]');
@@ -966,7 +1297,15 @@ document.addEventListener("click", (ev) => {
 
 document.addEventListener("change", (ev) => {
   const sel = ev.target.closest("[data-status-select]");
-  if (sel) setEventStatus(sel.getAttribute("data-status-select"), sel.value);
+  if (sel) { setEventStatus(sel.getAttribute("data-status-select"), sel.value); return; }
+
+  const photoInput = ev.target.closest("[data-photo-upload]");
+  if (photoInput) {
+    const eventId = photoInput.getAttribute("data-photo-upload");
+    const file = photoInput.files && photoInput.files[0];
+    uploadEventPhoto(eventId, file);
+    photoInput.value = "";
+  }
 });
 
 document.addEventListener("submit", (ev) => {
@@ -981,6 +1320,7 @@ document.addEventListener("submit", (ev) => {
     adminLogin(fd.get("email"), fd.get("password"));
   }
   if (ev.target.id === "event-form") createOrUpdateEvent(ev.target);
+  if (ev.target.id === "announcement-form") createAnnouncement(ev.target);
 });
 
 attachPublicListeners();
