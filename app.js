@@ -17,7 +17,19 @@ import {
   getStorage, ref as storageRef, uploadBytes, getDownloadURL, deleteObject
 } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-storage.js";
 
-import { firebaseConfig, ADMIN_EMAIL } from "./firebase-config.js";
+import * as firebaseConfigModule from "./firebase-config.js";
+const { firebaseConfig, ADMIN_EMAILS: ADMIN_EMAILS_CONFIG, ADMIN_EMAIL: ADMIN_EMAIL_CONFIG } = firebaseConfigModule;
+
+// Supports either a single ADMIN_EMAIL (legacy) or a list of ADMIN_EMAILS in
+// firebase-config.js. Emails are compared case-insensitively.
+const ADMIN_EMAILS = (Array.isArray(ADMIN_EMAILS_CONFIG) && ADMIN_EMAILS_CONFIG.length
+  ? ADMIN_EMAILS_CONFIG
+  : (ADMIN_EMAIL_CONFIG ? [ADMIN_EMAIL_CONFIG] : [])
+).map(e => e.toLowerCase());
+
+function isAdminEmail(email) {
+  return !!email && ADMIN_EMAILS.includes(email.toLowerCase());
+}
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
@@ -57,6 +69,7 @@ let state = {
   allRsvps: [],          // admin-only, all rsvps (for tallies)
   adminTab: "pending",
   editingEventId: null,
+  editingAddress: false,
   notice: null,
   modal: null,
   mobileNavOpen: false,
@@ -168,7 +181,7 @@ onAuthStateChanged(auth, async (user) => {
   if (!user) {
     state.isAdmin = false;
     state.currentMember = null;
-  } else if (user.email === ADMIN_EMAIL) {
+  } else if (isAdminEmail(user.email)) {
     state.isAdmin = true;
     state.currentMember = null;
     attachAdminOnlyListeners();
@@ -276,11 +289,12 @@ async function submitRegistration(form) {
   const relationship = fd.get("relationship").trim();
   const email = fd.get("email").trim().toLowerCase();
   const phone = fd.get("phone").trim();
+  const address = fd.get("address").trim();
   const notes = fd.get("notes").trim();
   const password = fd.get("password");
   const confirmPassword = fd.get("confirmPassword");
 
-  if (!guardianName || !memberName || !email || !phone || !password) {
+  if (!guardianName || !memberName || !email || !phone || !address || !password) {
     setNotice("error", "Please fill in all required fields.");
     return;
   }
@@ -319,7 +333,7 @@ async function submitRegistration(form) {
 
   try {
     await addDoc(collection(db, "registrations"), {
-      guardianName, memberName, relationship, email, phone, notes, authUid,
+      guardianName, memberName, relationship, email, phone, address, notes, authUid,
       status: "pending", createdAt: serverTimestamp()
     });
     goto("registerSuccess");
@@ -334,7 +348,7 @@ async function submitRegistration(form) {
 async function adminLogin(email, password) {
   try {
     const cred = await signInWithEmailAndPassword(auth, email.trim(), password);
-    if (cred.user.email !== ADMIN_EMAIL) {
+    if (!isAdminEmail(cred.user.email)) {
       await signOut(auth);
       setNotice("error", "This account isn't set up as the admin.");
     }
@@ -358,7 +372,7 @@ async function approveRegistration(regId) {
     try {
       await setDoc(doc(db, "members", reg.authUid), {
         guardianName: reg.guardianName, memberName: reg.memberName,
-        relationship: reg.relationship || "", email: reg.email, phone: reg.phone,
+        relationship: reg.relationship || "", email: reg.email, phone: reg.phone, address: reg.address || "",
         status: "active", createdAt: serverTimestamp()
       });
       await updateDoc(doc(db, "registrations", regId), { status: "approved" });
@@ -380,7 +394,7 @@ async function approveRegistration(regId) {
 
     await setDoc(doc(db, "members", uid), {
       guardianName: reg.guardianName, memberName: reg.memberName,
-      relationship: reg.relationship || "", email: reg.email, phone: reg.phone,
+      relationship: reg.relationship || "", email: reg.email, phone: reg.phone, address: reg.address || "",
       status: "active", createdAt: serverTimestamp()
     });
 
@@ -459,6 +473,19 @@ async function forgotPassword(email) {
 function logout() {
   signOut(auth);
   goto("home");
+}
+
+async function updateMyAddress(address) {
+  if (!state.currentMember) return;
+  const trimmed = address.trim();
+  if (!trimmed) { setNotice("error", "Address can't be empty."); return; }
+  try {
+    await updateDoc(doc(db, "members", state.currentMember.id), { address: trimmed });
+    state.currentMember.address = trimmed;
+    state.editingAddress = false;
+    render();
+    setNotice("success", "Address updated.");
+  } catch (e) { console.error(e); setNotice("error", "Couldn't update — try again."); }
 }
 
 /* ---------------------------- actions: events ---------------------------- */
@@ -809,6 +836,7 @@ function renderRegister() {
             <label>Email address *<input type="email" name="email" required /></label>
             <label>Phone number *<input type="tel" name="phone" required /></label>
           </div>
+          <label>Home address *<input name="address" required placeholder="House/Street, Barangay, City" /></label>
           <div class="two-col">
             <label>Create a password *<input type="password" name="password" minlength="6" required /></label>
             <label>Confirm password *<input type="password" name="confirmPassword" minlength="6" required /></label>
@@ -945,6 +973,28 @@ function renderMemberDashboard() {
     </div>`;
   };
 
+  const addressHTML = () => {
+    if (state.editingAddress) {
+      return `
+      <div class="address-block card form-card">
+        <h2 class="section-sub">My address</h2>
+        <form id="address-form">
+          <label>Home address<textarea name="address" rows="2" required>${escapeHtml(m.address || "")}</textarea></label>
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary btn-sm">Save</button>
+            <button type="button" class="btn btn-outline btn-sm" data-cancel-address="1">Cancel</button>
+          </div>
+        </form>
+      </div>`;
+    }
+    return `
+    <div class="address-block card form-card">
+      <h2 class="section-sub">My address</h2>
+      <p>${m.address ? escapeHtml(m.address) : `<span class="fine-print">No address on file.</span>`}</p>
+      <button class="link small" data-edit-address="1">${m.address ? "Edit address" : "Add address"}</button>
+    </div>`;
+  };
+
   return `
   <header class="site-header">
     <div class="wrap nav-inner">
@@ -962,6 +1012,7 @@ function renderMemberDashboard() {
       <div class="wrap">
         ${nextUpBannerHTML()}
         ${announcementsHTML()}
+        ${addressHTML()}
         <h1>Upcoming events</h1>
         ${groups.upcoming.length ? `<div class="event-grid">${groups.upcoming.map(card).join("")}</div>` : `<p class="empty">No upcoming events right now — check back soon.</p>`}
         ${groups.ongoing.length ? `<h2 class="section-sub">Happening now</h2><div class="event-grid">${groups.ongoing.map(card).join("")}</div>` : ""}
@@ -1011,13 +1062,14 @@ function renderAdminDashboard() {
   if (state.adminTab === "pending") {
     body = pending.length ? `
       <div class="table-wrap"><table class="admin-table">
-        <thead><tr><th>Guardian</th><th>Member</th><th>Contact</th><th>Notes</th><th>Action</th></tr></thead>
+        <thead><tr><th>Guardian</th><th>Member</th><th>Contact</th><th>Address</th><th>Notes</th><th>Action</th></tr></thead>
         <tbody>
           ${pending.map(r => `
             <tr>
               <td>${escapeHtml(r.guardianName)}<br><span class="fine-print">${escapeHtml(r.relationship||"")}</span></td>
               <td>${escapeHtml(r.memberName)}</td>
               <td>${escapeHtml(r.email)}<br><span class="fine-print">${escapeHtml(r.phone)}</span></td>
+              <td class="notes-cell">${escapeHtml(r.address || "—")}</td>
               <td class="notes-cell">${escapeHtml(r.notes || "—")}</td>
               <td class="actions-cell">
                 <button class="btn btn-primary btn-sm" data-approve="${r.id}">Approve</button>
@@ -1041,6 +1093,7 @@ function renderAdminDashboard() {
         <td>${escapeHtml(m.guardianName)}<br><span class="fine-print">${escapeHtml(m.relationship||"")}</span></td>
         <td>${escapeHtml(m.memberName)}</td>
         <td>${escapeHtml(m.email)}<br><span class="fine-print">${escapeHtml(m.phone)}</span></td>
+        <td class="fine-print">${escapeHtml(m.address || "—")}</td>
         <td>${statusPill(m.status)}</td>
         <td class="actions-cell">${showActions ? `
           <button class="btn btn-outline btn-sm" data-resend="${escapeHtml(m.email)}">Resend reset email</button>
@@ -1049,7 +1102,7 @@ function renderAdminDashboard() {
       </tr>`;
     body = `
       <div class="table-wrap"><table class="admin-table">
-        <thead><tr><th>Guardian</th><th>Member</th><th>Contact</th><th>Status</th><th></th></tr></thead>
+        <thead><tr><th>Guardian</th><th>Member</th><th>Contact</th><th>Address</th><th>Status</th><th></th></tr></thead>
         <tbody>${active.map(m => row(m, true)).join("")}${revoked.map(m => row(m, false)).join("")}</tbody>
       </table></div>
       ${!active.length && !revoked.length ? `<p class="empty">No members yet.</p>` : ""}
@@ -1287,6 +1340,12 @@ document.addEventListener("click", (ev) => {
     return;
   }
 
+  const editAddress = ev.target.closest("[data-edit-address]");
+  if (editAddress) { state.editingAddress = true; render(); return; }
+
+  const cancelAddress = ev.target.closest("[data-cancel-address]");
+  if (cancelAddress) { state.editingAddress = false; render(); return; }
+
   const forgotBtn = ev.target.closest("#forgot-btn");
   if (forgotBtn) {
     const emailInput = document.querySelector('#login-form input[name="email"]');
@@ -1321,6 +1380,10 @@ document.addEventListener("submit", (ev) => {
   }
   if (ev.target.id === "event-form") createOrUpdateEvent(ev.target);
   if (ev.target.id === "announcement-form") createAnnouncement(ev.target);
+  if (ev.target.id === "address-form") {
+    const fd = new FormData(ev.target);
+    updateMyAddress(fd.get("address"));
+  }
 });
 
 attachPublicListeners();
